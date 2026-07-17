@@ -16,6 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / "app" / "홍보배차판.jsx"
 OUT = ROOT / "dist" / "홍보배차판_단독실행.html"
+# GitHub Pages 진입점(주소만 누르면 열리는 웹 버전). 내용은 단독 실행판과 동일.
+INDEX = ROOT / "index.html"
 
 ENTRY = '''import React from "react";
 import { createRoot } from "react-dom/client";
@@ -77,10 +79,14 @@ def main():
                         "--define:process.env.NODE_ENV=\"production\"", "--format=iife",
                         "--outfile=app.bundle.js"], cwd=tmp, check=True)
         bundle = (tmp / "app.bundle.js").read_text(encoding="utf-8").replace("</script>", "<\\/script>")
+        html = SHELL_HEAD + bundle + SHELL_TAIL
         OUT.parent.mkdir(parents=True, exist_ok=True)
-        OUT.write_text(SHELL_HEAD + bundle + SHELL_TAIL, encoding="utf-8")
-        print(f"\n✔ 완료: {OUT}  ({OUT.stat().st_size // 1024} KB)")
-        print("  브라우저에서 이 파일을 열면 인터넷 없이 앱이 실행됩니다.")
+        OUT.write_text(html, encoding="utf-8")
+        INDEX.write_text(html, encoding="utf-8")  # 웹(Pages)용 동일 사본
+        print(f"\n✔ 완료:")
+        print(f"  - {OUT}  ({OUT.stat().st_size // 1024} KB)  ← 다운로드용 단일 파일")
+        print(f"  - {INDEX}  ← GitHub Pages 웹 진입점(index.html)")
+        print("  브라우저에서 열면 인터넷 없이 앱이 실행됩니다.")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
