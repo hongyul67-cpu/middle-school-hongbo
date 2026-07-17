@@ -25,30 +25,80 @@ const STATUS_COLOR = {
 };
 const REACT_OPTS = ["좋음", "보통", "미온", "부재중"];
 const TIER_COLOR = { "상": { fg: "#9A5B00", bg: C.amberBg }, "중": { fg: C.ink70, bg: C.navyBg }, "하": { fg: C.steelLt, bg: C.grayBg } };
-const KEY = "outreach-state-v1";
+const KEY = "outreach-state-v2";
+const OLD_KEY = "outreach-state-v1";
 const ROUND_LABELS = ["1차", "2차", "3차", "4차", "5차", "6차"];
+const FIELDS = ["status", "rounds", "interest", "reaction", "next", "memo"];
 
-/* ===== 저장소 (팀 공유: shared=true) ===== */
-async function loadState() {
-  try {
-    const r = await window.storage.get(KEY, true);
-    return r && r.value ? JSON.parse(r.value) : {};
-  } catch (e) { return {}; }
+/* ===== 저장소 (팀 공유: shared=true) =====
+   동시편집 안전화:
+   - 학교 키 = "학교명|지역" (동명 학교 충돌 방지)
+   - 레코드마다 필드별 수정시각(_t) 보관 → 병합 시 더 최신 값 채택(last-write-wins 완화)
+   - 여러 명이 같은 학교의 다른 항목을 고쳐도 서로 덮어쓰지 않음                        */
+
+// 두 레코드를 필드별 최신값 기준으로 병합.
+function mergeRec(a, b) {
+  const at = (a && a._t) || {}, bt = (b && b._t) || {};
+  const out = {}, t = {};
+  FIELDS.forEach((f) => {
+    const hasA = a && f in a, hasB = b && f in b;
+    if (hasB && (!hasA || (bt[f] || 0) >= (at[f] || 0))) { out[f] = b[f]; t[f] = bt[f] || at[f] || 0; }
+    else if (hasA) { out[f] = a[f]; t[f] = at[f] || 0; }
+  });
+  out._t = t;
+  return out;
 }
-async function mergeSave(name, patch) {
-  let cur = {};
-  try { const r = await window.storage.get(KEY, true); if (r && r.value) cur = JSON.parse(r.value); } catch (e) {}
-  cur[name] = { ...(cur[name] || {}), ...patch };
+// 전체 상태(모든 학교) 병합.
+function mergeState(a, b) {
+  const out = { ...a };
+  Object.keys(b || {}).forEach((k) => { out[k] = mergeRec(a[k], b[k]); });
+  return out;
+}
+// patch(필드→값)에 현재 시각 타임스탬프를 찍어 저장용 부분 레코드로.
+function stamp(patch, ts) {
+  const rec = { _t: {} };
+  Object.keys(patch).forEach((f) => { rec[f] = patch[f]; rec._t[f] = ts; });
+  return rec;
+}
+// v1(학교명만) → v2(학교명|지역) 마이그레이션. 동명은 첫 학교로 귀속.
+function migrateV1(old) {
+  const byName = {};
+  SCHOOLS.forEach((s) => { (byName[s.n] = byName[s.n] || []).push(s); });
+  const out = {};
+  Object.entries(old || {}).forEach(([name, rec]) => {
+    const cand = byName[name];
+    const key = cand && cand.length ? `${cand[0].n}|${cand[0].g}` : name;
+    out[key] = mergeRec(out[key], { ...rec, _t: rec._t || {} });
+  });
+  return out;
+}
+
+async function readShared(key) {
+  try { const r = await window.storage.get(key, true); return r && r.value ? JSON.parse(r.value) : null; }
+  catch (e) { return null; }
+}
+async function loadState() {
+  const v2 = await readShared(KEY);
+  if (v2) return v2;
+  const v1 = await readShared(OLD_KEY); // 기존 데이터 있으면 승격
+  if (v1) {
+    const migrated = migrateV1(v1);
+    try { await window.storage.set(KEY, JSON.stringify(migrated), true); } catch (e) {}
+    return migrated;
+  }
+  return {};
+}
+async function mergeSave(key, patch) {
+  const cur = (await readShared(KEY)) || {};
+  cur[key] = mergeRec(cur[key], stamp(patch, Date.now()));
   try { await window.storage.set(KEY, JSON.stringify(cur), true); } catch (e) {}
   return cur;
 }
 // 여러 학교 기록을 한 번에 병합 저장(가져오기용). 최신 원본을 다시 읽어 덮어쓰기 최소화.
 async function bulkMergeSave(patches) {
-  let cur = {};
-  try { const r = await window.storage.get(KEY, true); if (r && r.value) cur = JSON.parse(r.value); } catch (e) {}
-  Object.entries(patches).forEach(([name, patch]) => {
-    cur[name] = { ...(cur[name] || {}), ...patch };
-  });
+  const cur = (await readShared(KEY)) || {};
+  const ts = Date.now();
+  Object.entries(patches).forEach(([key, patch]) => { cur[key] = mergeRec(cur[key], stamp(patch, ts)); });
   try { await window.storage.set(KEY, JSON.stringify(cur), true); } catch (e) {}
   return cur;
 }
@@ -76,6 +126,8 @@ function parseCSV(text) {
 
 const emptyRec = () => ({ status: "미방문", rounds: ["", "", "", "", "", ""], interest: "", reaction: "", next: "", memo: "" });
 const todayStr = () => { const d = new Date(); return `${d.getMonth() + 1}/${d.getDate()}`; };
+// 저장 키: 학교명+지역 (동명 학교 구분)
+const keyOf = (s) => `${s.n}|${s.g}`;
 
 export default function App() {
   const [state, setState] = useState({});
@@ -88,12 +140,31 @@ export default function App() {
   const [msg, setMsg] = useState("");
   const fileRef = useRef(null);
 
-  useEffect(() => { loadState().then((s) => { setState(s); setReady(true); }); }, []);
+  const [synced, setSynced] = useState(null);
 
-  const rec = useCallback((name) => state[name] || emptyRec(), [state]);
-  const update = useCallback((name, patch) => {
-    setState((prev) => ({ ...prev, [name]: { ...(prev[name] || emptyRec()), ...patch } }));
-    mergeSave(name, patch);
+  useEffect(() => { loadState().then((s) => { setState(s); setReady(true); setSynced(Date.now()); }); }, []);
+
+  // 팀원 변경 자동 반영: 15초마다 공유 저장소를 다시 읽어 필드별 최신값으로 병합.
+  // 지금 펼쳐서 편집 중인 학교(open)는 입력 방해 방지를 위해 병합에서 제외.
+  useEffect(() => {
+    if (!ready) return;
+    const id = setInterval(async () => {
+      const remote = await readShared(KEY);
+      if (!remote) return;
+      setState((prev) => {
+        const merged = mergeState(prev, remote);
+        if (open && remote[open]) merged[open] = prev[open] || merged[open]; // 편집 중 학교 보존
+        return merged;
+      });
+      setSynced(Date.now());
+    }, 15000);
+    return () => clearInterval(id);
+  }, [ready, open]);
+
+  const rec = useCallback((key) => state[key] || emptyRec(), [state]);
+  const update = useCallback((key, patch) => {
+    setState((prev) => ({ ...prev, [key]: { ...(prev[key] || emptyRec()), ...patch } }));
+    mergeSave(key, patch);
   }, []);
 
   const regions = useMemo(() => {
@@ -105,21 +176,21 @@ export default function App() {
   const list = useMemo(() => {
     let arr = SCHOOLS.filter((s) => {
       if (region !== "전체" && s.g !== region) return false;
-      const st = rec(s.n).status;
+      const st = rec(keyOf(s)).status;
       if (statusF !== "전체" && st !== statusF) return false;
       if (q && !s.n.includes(q)) return false;
       return true;
     });
     if (sort === "priority") arr = [...arr].sort((a, b) => b.sc - a.sc);
     else if (sort === "region") arr = [...arr].sort((a, b) => a.g.localeCompare(b.g, "ko") || b.sc - a.sc);
-    else if (sort === "status") arr = [...arr].sort((a, b) => STATUS.indexOf(rec(a.n).status) - STATUS.indexOf(rec(b.n).status) || b.sc - a.sc);
+    else if (sort === "status") arr = [...arr].sort((a, b) => STATUS.indexOf(rec(keyOf(a)).status) - STATUS.indexOf(rec(keyOf(b)).status) || b.sc - a.sc);
     return arr;
   }, [region, statusF, q, sort, rec]);
 
   const stats = useMemo(() => {
     let done = 0, revisit = 0, interest = 0, brief = 0;
     SCHOOLS.forEach((s) => {
-      const r = rec(s.n);
+      const r = rec(keyOf(s));
       if (r.status === "방문완료") done++;
       if (r.status === "재방문필요") revisit++;
       if (r.status === "설명회예정") brief++;
@@ -131,7 +202,7 @@ export default function App() {
   const exportCSV = () => {
     const head = ["순위", "학교명", "지역", "시도", "최근3년입학생수", "2026입학생수", "3학년학급수", "학생수", "대표학과", "우선순위점수", "등급", "방문상태", ...ROUND_LABELS, "관심학생수", "반응", "다음할일", "비고"];
     const rows = [...SCHOOLS].sort((a, b) => b.sc - a.sc).map((s, i) => {
-      const r = rec(s.n);
+      const r = rec(keyOf(s));
       return [i + 1, s.n, s.g, s.s, s.y3 ?? "", s.y26 ?? "", s.c3 ?? "", s.st ?? "", s.d, s.sc, s.t, r.status, ...r.rounds, r.interest, r.reaction, r.next, r.memo]
         .map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",");
     });
@@ -152,19 +223,25 @@ export default function App() {
         if (rows.length < 2) { setMsg("가져올 데이터가 없습니다."); return; }
         const head = rows[0].map((h) => h.trim());
         const col = (name) => head.indexOf(name);
-        const iName = col("학교명");
+        const iName = col("학교명"), iRegion = col("지역");
         if (iName < 0) { setMsg("CSV에 '학교명' 열이 없습니다. 내보내기 형식의 파일인지 확인하세요."); return; }
-        const known = new Set(SCHOOLS.map((s) => s.n));
+        // 학교명+지역으로 매칭. 지역 열이 없거나 비면 동명이 하나뿐인 학교로 매칭.
+        const byKey = new Set(SCHOOLS.map(keyOf));
+        const nameCount = {}; SCHOOLS.forEach((s) => { nameCount[s.n] = (nameCount[s.n] || 0) + 1; });
+        const soleKey = {}; SCHOOLS.forEach((s) => { if (nameCount[s.n] === 1) soleKey[s.n] = keyOf(s); });
         const iStatus = col("방문상태"), iInterest = col("관심학생수"),
           iReact = col("반응"), iNext = col("다음할일"), iMemo = col("비고");
         const iRounds = ROUND_LABELS.map((lb) => col(lb));
         const patches = {};
-        let matched = 0, skipped = 0, filled = 0;
+        let matched = 0, skipped = 0;
         for (let r = 1; r < rows.length; r++) {
           const cells = rows[r];
           const name = (cells[iName] || "").trim();
           if (!name) continue;
-          if (!known.has(name)) { skipped++; continue; }
+          const region = iRegion >= 0 ? (cells[iRegion] || "").trim() : "";
+          let key = region ? `${name}|${region}` : null;
+          if (!key || !byKey.has(key)) key = byKey.has(`${name}|${region}`) ? `${name}|${region}` : soleKey[name];
+          if (!key || !byKey.has(key)) { skipped++; continue; }
           const get = (i) => (i >= 0 && cells[i] != null ? String(cells[i]).trim() : "");
           const rounds = iRounds.map((i) => get(i));
           const status = get(iStatus);
@@ -177,12 +254,11 @@ export default function App() {
           };
           if (STATUS.includes(status)) patch.status = status;
           // 실제 내용이 있는 행만 반영(빈 행 스킵)
-          const hasContent = patch.status && patch.status !== "미방문"
+          const hasContent = (patch.status && patch.status !== "미방문")
             || rounds.some(Boolean) || patch.interest || patch.reaction || patch.next || patch.memo;
           if (!hasContent) continue;
-          patches[name] = { ...(patches[name] || {}), ...patch };
+          patches[key] = { ...(patches[key] || {}), ...patch };
           matched++;
-          if (rounds.some(Boolean)) filled++;
         }
         if (matched === 0) { setMsg(`반영할 기록이 없습니다.${skipped ? ` (미매칭 ${skipped}행)` : ""}`); return; }
         setState((prev) => {
@@ -222,7 +298,10 @@ export default function App() {
               <div style={{ fontSize: 11, letterSpacing: 2, color: C.amber, fontWeight: 700 }}>2027 신입생 모집 홍보</div>
               <h1 style={{ margin: "2px 0 0", fontSize: 21, fontWeight: 800, letterSpacing: -0.4 }}>홍보 배차판</h1>
             </div>
-            <span style={{ fontSize: 10.5, color: C.steelLt, border: `1px solid ${C.ink2}`, padding: "3px 7px", borderRadius: 20, whiteSpace: "nowrap" }}>● 팀 공유 중</span>
+            <span title={synced ? `마지막 동기화 ${new Date(synced).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}` : ""}
+              style={{ fontSize: 10.5, color: C.steelLt, border: `1px solid ${C.ink2}`, padding: "3px 7px", borderRadius: 20, whiteSpace: "nowrap" }}>
+              ● 팀 공유 {synced ? new Date(synced).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "중"}
+            </span>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginTop: 14 }}>
@@ -288,10 +367,13 @@ export default function App() {
             조건에 맞는 학교가 없습니다. 필터를 바꿔 보세요.
           </div>
         )}
-        {list.map((s) => (
-          <SchoolCard key={s.n} s={s} r={rec(s.n)} open={open === s.n}
-            onToggle={() => setOpen(open === s.n ? null : s.n)} onUpdate={(p) => update(s.n, p)} />
-        ))}
+        {list.map((s) => {
+          const k = keyOf(s);
+          return (
+            <SchoolCard key={k} s={s} r={rec(k)} open={open === k}
+              onToggle={() => setOpen(open === k ? null : k)} onUpdate={(p) => update(k, p)} />
+          );
+        })}
       </main>
     </div>
   );
@@ -324,7 +406,9 @@ function SchoolCard({ s, r, open, onToggle, onUpdate }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             <span style={{ fontSize: 15.5, fontWeight: 800, letterSpacing: -0.3 }}>{s.n}</span>
-            {s.d && <span style={{ fontSize: 10.5, color: C.amber === C.amber ? "#9A5B00" : C.ink, background: C.amberBg, borderRadius: 5, padding: "1px 6px", fontWeight: 700 }}>{s.d}</span>}
+            {s.d
+              ? <span style={{ fontSize: 10.5, color: "#9A5B00", background: C.amberBg, borderRadius: 5, padding: "1px 6px", fontWeight: 700 }}>{s.d}</span>
+              : <span style={{ fontSize: 10.5, color: C.steelLt, background: C.grayBg, borderRadius: 5, padding: "1px 6px", fontWeight: 700, border: `1px dashed ${C.line}` }}>학과 미배정</span>}
           </div>
           <div style={{ fontSize: 12, color: C.steel, marginTop: 3 }}>
             {s.g} · <span style={{ fontFamily: MONO }}>3년 {s.y3 ?? "-"}명</span> · <span style={{ fontFamily: MONO }}>학급 {s.c3 ?? "-"}</span>
