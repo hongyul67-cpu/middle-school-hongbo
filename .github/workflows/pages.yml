@@ -1,0 +1,36 @@
+name: Deploy to GitHub Pages
+
+# 웹 버전(index.html) 자동 배포. Pages 설정의 Source가 "GitHub Actions"일 때 동작.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 동시에 하나만 배포(중간 취소 안 함)
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload site (repo root, index.html 포함)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "."
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
