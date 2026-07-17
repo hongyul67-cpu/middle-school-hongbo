@@ -77,12 +77,19 @@ async function readShared(key) {
   try { const r = await window.storage.get(key, true); return r && r.value ? JSON.parse(r.value) : null; }
   catch (e) { return null; }
 }
+// 저장된 회차 값을 ISO 날짜로 정규화(옛 "M/D" 데이터 호환).
+function normalizeRounds(state) {
+  Object.values(state || {}).forEach((rec) => {
+    if (rec && Array.isArray(rec.rounds)) rec.rounds = rec.rounds.map(normDate);
+  });
+  return state;
+}
 async function loadState() {
   const v2 = await readShared(KEY);
-  if (v2) return v2;
+  if (v2) return normalizeRounds(v2);
   const v1 = await readShared(OLD_KEY); // 기존 데이터 있으면 승격
   if (v1) {
-    const migrated = migrateV1(v1);
+    const migrated = normalizeRounds(migrateV1(v1));
     try { await window.storage.set(KEY, JSON.stringify(migrated), true); } catch (e) {}
     return migrated;
   }
@@ -125,9 +132,23 @@ function parseCSV(text) {
 }
 
 const emptyRec = () => ({ status: "미방문", rounds: ["", "", "", "", "", ""], interest: "", reaction: "", next: "", memo: "" });
-const todayStr = () => { const d = new Date(); return `${d.getMonth() + 1}/${d.getDate()}`; };
+const pad2 = (n) => String(n).padStart(2, "0");
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
+const todayStr = () => todayISO(); // (하위호환용 별칭)
 // 저장 키: 학교명+지역 (동명 학교 구분)
 const keyOf = (s) => `${s.n}|${s.g}`;
+// 회차 날짜 정규화: 옛 형식 "M/D" → "올해-MM-DD", ISO는 그대로, 그 외 빈 값.
+const normDate = (v) => {
+  const t = String(v == null ? "" : v).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  const md = t.match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (md) return `${new Date().getFullYear()}-${pad2(md[1])}-${pad2(md[2])}`;
+  const ymd = t.match(/^(\d{4})[.\/](\d{1,2})[.\/](\d{1,2})$/);
+  if (ymd) return `${ymd[1]}-${pad2(ymd[2])}-${pad2(ymd[3])}`;
+  return t ? t : "";
+};
+// 화면 표시용 짧은 날짜: "2027-03-05" → "3/5"
+const shortDate = (v) => { const m = String(v || "").match(/^\d{4}-(\d{2})-(\d{2})$/); return m ? `${+m[1]}/${+m[2]}` : (v || ""); };
 
 export default function App() {
   const [state, setState] = useState({});
@@ -163,7 +184,13 @@ export default function App() {
 
   const rec = useCallback((key) => state[key] || emptyRec(), [state]);
   const update = useCallback((key, patch) => {
-    setState((prev) => ({ ...prev, [key]: { ...(prev[key] || emptyRec()), ...patch } }));
+    const ts = Date.now();
+    setState((prev) => {
+      const base = prev[key] || emptyRec();
+      const _t = { ...(base._t || {}) };
+      Object.keys(patch).forEach((f) => { _t[f] = ts; });
+      return { ...prev, [key]: { ...base, ...patch, _t } };
+    });
     mergeSave(key, patch);
   }, []);
 
@@ -243,7 +270,7 @@ export default function App() {
           if (!key || !byKey.has(key)) key = byKey.has(`${name}|${region}`) ? `${name}|${region}` : soleKey[name];
           if (!key || !byKey.has(key)) { skipped++; continue; }
           const get = (i) => (i >= 0 && cells[i] != null ? String(cells[i]).trim() : "");
-          const rounds = iRounds.map((i) => get(i));
+          const rounds = iRounds.map((i) => normDate(get(i)));
           const status = get(iStatus);
           const patch = {
             rounds,
@@ -442,20 +469,22 @@ function SchoolCard({ s, r, open, onToggle, onUpdate }) {
           </Field>
 
           {/* 라운드 */}
-          <Field label="방문 회차 (누르면 오늘 날짜 기록 / 다시 누르면 삭제)">
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 5 }}>
+          <Field label="방문 회차 (날짜 선택 · '오늘'로 빠르게 기록 · 비우면 삭제)">
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 6 }}>
               {ROUND_LABELS.map((lb, i) => {
                 const on = !!r.rounds[i];
+                const setRound = (val) => { const rounds = [...r.rounds]; rounds[i] = val; onUpdate({ rounds }); };
                 return (
-                  <button key={i} onClick={() => {
-                    const rounds = [...r.rounds]; rounds[i] = on ? "" : todayStr(); onUpdate({ rounds });
-                  }} style={{
-                    border: `1px solid ${on ? C.amber : C.line}`, background: on ? C.amberBg : "#fff",
-                    borderRadius: 8, padding: "7px 2px", textAlign: "center",
-                  }}>
-                    <div style={{ fontSize: 10.5, color: on ? "#9A5B00" : C.steel, fontWeight: 700 }}>{lb}</div>
-                    <div style={{ fontFamily: MONO, fontSize: 11.5, color: on ? C.ink : C.steelLt, marginTop: 2 }}>{on ? r.rounds[i] : "–"}</div>
-                  </button>
+                  <div key={i} style={{ border: `1px solid ${on ? C.amber : C.line}`, background: on ? C.amberBg : "#fff", borderRadius: 8, padding: "6px 7px" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                      <span style={{ fontSize: 10.5, color: on ? "#9A5B00" : C.steel, fontWeight: 700 }}>{lb}</span>
+                      {on
+                        ? <button onClick={() => setRound("")} title="삭제" style={{ border: "none", background: "transparent", color: C.steel, fontSize: 13, lineHeight: 1, padding: 0 }}>✕</button>
+                        : <button onClick={() => setRound(todayISO())} style={{ border: `1px solid ${C.line}`, background: "#fff", color: C.ink, borderRadius: 5, fontSize: 10, fontWeight: 700, padding: "1px 6px" }}>오늘</button>}
+                    </div>
+                    <input type="date" value={r.rounds[i] || ""} onChange={(e) => setRound(e.target.value)}
+                      style={{ width: "100%", border: `1px solid ${C.line}`, borderRadius: 6, padding: "5px 6px", fontSize: 12.5, fontFamily: MONO, background: "#fff", color: on ? C.ink : C.steelLt }} />
+                  </div>
                 );
               })}
             </div>
