@@ -4,7 +4,7 @@
 데이터 재생성 도구 — 앱(SCHOOLS)과 마스터 엑셀을 한 번에 맞춘다.
 
 입력(있으면 병합, 없으면 무시):
-  data/대표학과_미배정_76개교_배정용.csv   ← '대표학과(여기에_작성)' 열을 채워서 저장
+  data/대표학과_미배정_74개교_배정용.csv   ← '대표학과(여기에_작성)' 열을 채워서 저장
   data/학교_주소좌표_입력용.csv            ← 도로명주소/위도/경도 열을 채워서 저장
 
 동작:
@@ -25,7 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 JSX = ROOT / "app" / "홍보배차판.jsx"
 XLSX = ROOT / "data" / "홍보대상학교_마스터.xlsx"
-DEPT_CSV = ROOT / "data" / "대표학과_미배정_76개교_배정용.csv"
+DEPT_CSV = ROOT / "data" / "대표학과_미배정_74개교_배정용.csv"
 GEO_CSV = ROOT / "data" / "학교_주소좌표_입력용.csv"
 
 # 등급 경계값 (안내 시트 B7/B8과 동일하게 유지)
