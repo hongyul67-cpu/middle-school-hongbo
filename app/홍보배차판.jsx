@@ -27,6 +27,7 @@ const REACT_OPTS = ["좋음", "보통", "미온", "부재중"];
 const TIER_COLOR = { "상": { fg: "#9A5B00", bg: C.amberBg }, "중": { fg: C.ink70, bg: C.navyBg }, "하": { fg: C.steelLt, bg: C.grayBg } };
 const KEY = "outreach-state-v2";
 const OLD_KEY = "outreach-state-v1";
+const HELP_SEEN = "outreach-help-seen-v1"; // 사용법 안내를 봤는지(기기별)
 const ROUND_LABELS = ["1차", "2차", "3차", "4차", "5차", "6차"];
 const FIELDS = ["status", "rounds", "interest", "reaction", "next", "memo"];
 
@@ -161,11 +162,18 @@ export default function App() {
   const [sort, setSort] = useState("priority");
   const [open, setOpen] = useState(null);
   const [msg, setMsg] = useState("");
+  const [showHelp, setShowHelp] = useState(false);
   const fileRef = useRef(null);
 
   const [synced, setSynced] = useState(null);
 
   useEffect(() => { loadState().then((s) => { setState(s); setReady(true); setSynced(Date.now()); }); }, []);
+
+  // 처음 여는 사람에게 사용법을 한 번 보여준다(닫으면 이 기기에서 다시 안 뜸).
+  useEffect(() => {
+    try { if (!localStorage.getItem(HELP_SEEN)) setShowHelp(true); } catch (e) {}
+  }, []);
+  const closeHelp = () => { setShowHelp(false); try { localStorage.setItem(HELP_SEEN, "1"); } catch (e) {} };
 
   // 팀원 변경 자동 반영: 15초마다 공유 저장소를 다시 읽어 필드별 최신값으로 병합.
   // 지금 펼쳐서 편집 중인 학교(open)는 입력 방해 방지를 위해 병합에서 제외.
@@ -321,6 +329,8 @@ export default function App() {
         .scrollx::-webkit-scrollbar { height: 0; }
       `}</style>
 
+      {showHelp && <HelpOverlay onClose={closeHelp} />}
+
       {/* ===== 헤더 ===== */}
       <header style={{ background: C.ink, color: "#fff", padding: "18px 16px 14px" }}>
         <div style={{ maxWidth: 760, margin: "0 auto" }}>
@@ -329,10 +339,14 @@ export default function App() {
               <div style={{ fontSize: 11, letterSpacing: 2, color: C.amber, fontWeight: 700 }}>2027 신입생 모집 홍보</div>
               <h1 style={{ margin: "2px 0 0", fontSize: 21, fontWeight: 800, letterSpacing: -0.4 }}>홍보 배차판</h1>
             </div>
-            <span title={synced ? `마지막 동기화 ${new Date(synced).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}` : ""}
-              style={{ fontSize: 10.5, color: C.steelLt, border: `1px solid ${C.ink2}`, padding: "3px 7px", borderRadius: 20, whiteSpace: "nowrap" }}>
-              ● 팀 공유 {synced ? new Date(synced).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "중"}
-            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>
+              <span title={synced ? `마지막 동기화 ${new Date(synced).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}` : ""}
+                style={{ fontSize: 10.5, color: C.steelLt, border: `1px solid ${C.ink2}`, padding: "3px 7px", borderRadius: 20 }}>
+                ● 팀 공유 {synced ? new Date(synced).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "중"}
+              </span>
+              <button onClick={() => setShowHelp(true)} title="사용법 보기" aria-label="사용법 보기"
+                style={{ width: 26, height: 26, borderRadius: 13, border: `1px solid ${C.ink2}`, background: "transparent", color: "#fff", fontSize: 13, fontWeight: 800, lineHeight: 1 }}>?</button>
+            </div>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginTop: 14 }}>
@@ -414,6 +428,49 @@ export default function App() {
           );
         })}
       </main>
+    </div>
+  );
+}
+
+function HelpOverlay({ onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const steps = [
+    ["1", "학교를 고르세요", "목록은 진학 실적 기준 우선순위 순. 위쪽일수록 먼저 갈 학교예요."],
+    ["2", "카드를 눌러 펼치세요", "방문 상태 · 회차 날짜 · 관심 학생 수 · 반응 · 다음 할 일 · 메모를 적습니다."],
+    ["3", "회차는 '오늘'만 누르면 끝", "방문한 날 회차의 '오늘' 버튼을 누르면 날짜가 자동 입력돼요. (직접 날짜 선택도 가능)"],
+    ["4", "찾기·좁히기", "맨 위에서 학교명 검색, 지역·상태·등급으로 필터. 카드의 지도 버튼으로 위치도 열려요."],
+  ];
+  return (
+    <div onClick={onClose} role="dialog" aria-modal="true" aria-label="사용법"
+      style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(20,36,59,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: "#fff", color: C.ink, borderRadius: 16, maxWidth: 420, width: "100%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 12px 40px rgba(0,0,0,0.3)" }}>
+        <div style={{ background: C.ink, color: "#fff", padding: "16px 18px", borderRadius: "16px 16px 0 0" }}>
+          <div style={{ fontSize: 11, letterSpacing: 2, color: C.amber, fontWeight: 700 }}>처음 오셨나요?</div>
+          <div style={{ fontSize: 18, fontWeight: 800, marginTop: 2 }}>홍보 배차판 3초 사용법</div>
+        </div>
+        <div style={{ padding: "14px 18px 4px" }}>
+          {steps.map(([n, t, d]) => (
+            <div key={n} style={{ display: "flex", gap: 12, marginBottom: 14 }}>
+              <div style={{ flexShrink: 0, width: 26, height: 26, borderRadius: 13, background: C.amberBg, color: "#9A5B00", fontWeight: 800, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: MONO }}>{n}</div>
+              <div>
+                <div style={{ fontSize: 14.5, fontWeight: 800 }}>{t}</div>
+                <div style={{ fontSize: 12.5, color: C.steel, marginTop: 2, lineHeight: 1.5 }}>{d}</div>
+              </div>
+            </div>
+          ))}
+          <div style={{ fontSize: 12, color: C.steel, background: C.grayBg, borderRadius: 8, padding: "9px 11px", lineHeight: 1.5 }}>
+            💾 적는 즉시 <b>자동 저장</b>돼요. 나중에 다시 보려면 오른쪽 위 <b>?</b> 를 누르세요.
+          </div>
+        </div>
+        <div style={{ padding: "12px 18px 18px" }}>
+          <button onClick={onClose} style={{ width: "100%", border: "none", background: C.ink, color: "#fff", fontSize: 15, fontWeight: 800, borderRadius: 10, padding: "12px 0" }}>시작하기</button>
+        </div>
+      </div>
     </div>
   );
 }
