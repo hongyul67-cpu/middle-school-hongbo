@@ -78,6 +78,45 @@ async function readShared(key) {
   try { const r = await window.storage.get(key, true); return r && r.value ? JSON.parse(r.value) : null; }
   catch (e) { return null; }
 }
+
+/* ===== 구글시트 연동(선택) =====
+   연결주소(Apps Script 웹앱 /exec URL)가 있으면 저장/동기화를 그 시트로 보낸다.
+   주소는 ?api=URL 파라미터 또는 localStorage 에 보관. 미설정 시 기존 로컬 저장. */
+const API_LS = "outreach-sheet-api";
+function apiUrl() {
+  try {
+    const p = new URLSearchParams(location.search).get("api");
+    if (p) { localStorage.setItem(API_LS, p); return p; }
+    return localStorage.getItem(API_LS) || "";
+  } catch (e) { return ""; }
+}
+function setApiUrl(u) { try { u ? localStorage.setItem(API_LS, u) : localStorage.removeItem(API_LS); } catch (e) {} }
+let _remoteOk = null; // null=미연결, true/false=최근 통신 결과
+function remoteStatus() { return apiUrl() ? _remoteOk : null; }
+async function remoteGet() {
+  const u = apiUrl(); if (!u) return null;
+  try {
+    const r = await fetch(u, { method: "GET" });
+    const j = await r.json();
+    if (j && j.ok) { _remoteOk = true; return j.state || {}; }
+  } catch (e) {}
+  _remoteOk = false; return null;
+}
+function remotePost(patches) {
+  const u = apiUrl(); if (!u) return;
+  fetch(u, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ patches }) })
+    .then((r) => r.json()).then((j) => { _remoteOk = !!(j && j.ok); })
+    .catch(() => { _remoteOk = false; });
+}
+// 공유 상태 읽기: 연결되어 있으면 시트에서, 아니면 로컬에서.
+async function pullShared() {
+  if (apiUrl()) {
+    const st = await remoteGet();
+    if (st) { const n = normalizeRounds(st); try { await window.storage.set(KEY, JSON.stringify(n), true); } catch (e) {} return n; }
+  }
+  const v2 = await readShared(KEY);
+  return v2 ? normalizeRounds(v2) : null;
+}
 // 저장된 회차 값을 ISO 날짜로 정규화(옛 "M/D" 데이터 호환).
 function normalizeRounds(state) {
   Object.values(state || {}).forEach((rec) => {
@@ -86,8 +125,8 @@ function normalizeRounds(state) {
   return state;
 }
 async function loadState() {
-  const v2 = await readShared(KEY);
-  if (v2) return normalizeRounds(v2);
+  const st = await pullShared();
+  if (st) return st;
   const v1 = await readShared(OLD_KEY); // 기존 데이터 있으면 승격
   if (v1) {
     const migrated = normalizeRounds(migrateV1(v1));
@@ -97,17 +136,21 @@ async function loadState() {
   return {};
 }
 async function mergeSave(key, patch) {
+  const stamped = stamp(patch, Date.now());
   const cur = (await readShared(KEY)) || {};
-  cur[key] = mergeRec(cur[key], stamp(patch, Date.now()));
-  try { await window.storage.set(KEY, JSON.stringify(cur), true); } catch (e) {}
+  cur[key] = mergeRec(cur[key], stamped);
+  try { await window.storage.set(KEY, JSON.stringify(cur), true); } catch (e) {} // 로컬 캐시(오프라인 대비)
+  remotePost({ [key]: stamped }); // 연결되어 있으면 시트로
   return cur;
 }
 // 여러 학교 기록을 한 번에 병합 저장(가져오기용). 최신 원본을 다시 읽어 덮어쓰기 최소화.
 async function bulkMergeSave(patches) {
-  const cur = (await readShared(KEY)) || {};
   const ts = Date.now();
-  Object.entries(patches).forEach(([key, patch]) => { cur[key] = mergeRec(cur[key], stamp(patch, ts)); });
+  const stampedAll = {};
+  const cur = (await readShared(KEY)) || {};
+  Object.entries(patches).forEach(([key, patch]) => { const s = stamp(patch, ts); stampedAll[key] = s; cur[key] = mergeRec(cur[key], s); });
   try { await window.storage.set(KEY, JSON.stringify(cur), true); } catch (e) {}
+  remotePost(stampedAll);
   return cur;
 }
 
@@ -163,11 +206,17 @@ export default function App() {
   const [open, setOpen] = useState(null);
   const [msg, setMsg] = useState("");
   const [showHelp, setShowHelp] = useState(false);
+  const [showConn, setShowConn] = useState(false);
+  const [online, setOnline] = useState(remoteStatus()); // null=로컬, true=시트 연결, false=연결 끊김
   const fileRef = useRef(null);
 
   const [synced, setSynced] = useState(null);
 
-  useEffect(() => { loadState().then((s) => { setState(s); setReady(true); setSynced(Date.now()); }); }, []);
+  const reload = useCallback(() => {
+    setReady(false);
+    loadState().then((s) => { setState(s); setReady(true); setSynced(Date.now()); setOnline(remoteStatus()); });
+  }, []);
+  useEffect(() => { reload(); }, [reload]);
 
   // 처음 여는 사람에게 사용법을 한 번 보여준다(닫으면 이 기기에서 다시 안 뜸).
   useEffect(() => {
@@ -180,7 +229,8 @@ export default function App() {
   useEffect(() => {
     if (!ready) return;
     const id = setInterval(async () => {
-      const remote = await readShared(KEY);
+      const remote = await pullShared();
+      setOnline(remoteStatus());
       if (!remote) return;
       setState((prev) => {
         const merged = mergeState(prev, remote);
@@ -334,6 +384,7 @@ export default function App() {
       `}</style>
 
       {showHelp && <HelpOverlay onClose={closeHelp} />}
+      {showConn && <ConnOverlay online={online} onClose={() => setShowConn(false)} onSaved={() => { setShowConn(false); reload(); }} />}
 
       {/* ===== 헤더 ===== */}
       <header style={{ background: C.ink, color: "#fff", padding: "18px 16px 14px" }}>
@@ -344,10 +395,17 @@ export default function App() {
               <h1 style={{ margin: "2px 0 0", fontSize: 21, fontWeight: 800, letterSpacing: -0.4 }}>홍보 배차판</h1>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>
-              <span title={synced ? `마지막 동기화 ${new Date(synced).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}` : ""}
-                style={{ fontSize: 10.5, color: C.steelLt, border: `1px solid ${C.ink2}`, padding: "3px 7px", borderRadius: 20 }}>
-                ● 팀 공유 {synced ? new Date(synced).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "중"}
-              </span>
+              {(() => {
+                const t = synced ? new Date(synced).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "";
+                const label = online === true ? `구글시트 ${t}` : online === false ? "연결 끊김" : `이 기기 저장 ${t}`;
+                const dot = online === true ? "#7FD6C8" : online === false ? C.coral : C.steelLt;
+                return (
+                  <button onClick={() => setShowConn(true)} title="구글시트 연결 설정"
+                    style={{ fontSize: 10.5, color: C.steelLt, border: `1px solid ${C.ink2}`, padding: "3px 8px", borderRadius: 20, background: "transparent", display: "flex", alignItems: "center", gap: 5 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: 4, background: dot, display: "inline-block" }} />{label}
+                  </button>
+                );
+              })()}
               <button onClick={() => setShowHelp(true)} title="사용법 보기" aria-label="사용법 보기"
                 style={{ width: 26, height: 26, borderRadius: 13, border: `1px solid ${C.ink2}`, background: "transparent", color: "#fff", fontSize: 13, fontWeight: 800, lineHeight: 1 }}>?</button>
             </div>
@@ -473,6 +531,50 @@ function HelpOverlay({ onClose }) {
         </div>
         <div style={{ padding: "12px 18px 18px" }}>
           <button onClick={onClose} style={{ width: "100%", border: "none", background: C.ink, color: "#fff", fontSize: 15, fontWeight: 800, borderRadius: 10, padding: "12px 0" }}>시작하기</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConnOverlay({ online, onClose, onSaved }) {
+  const [url, setUrl] = useState(apiUrl());
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const save = () => { setApiUrl(url.trim()); onSaved(); };
+  const disconnect = () => { setApiUrl(""); onSaved(); };
+  return (
+    <div onClick={onClose} role="dialog" aria-modal="true" aria-label="구글시트 연결"
+      style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(20,36,59,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: "#fff", color: C.ink, borderRadius: 16, maxWidth: 440, width: "100%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 12px 40px rgba(0,0,0,0.3)" }}>
+        <div style={{ background: C.ink, color: "#fff", padding: "16px 18px", borderRadius: "16px 16px 0 0" }}>
+          <div style={{ fontSize: 11, letterSpacing: 2, color: C.amber, fontWeight: 700 }}>팀 실시간 공유</div>
+          <div style={{ fontSize: 18, fontWeight: 800, marginTop: 2 }}>구글시트 연결</div>
+        </div>
+        <div style={{ padding: "14px 18px 4px" }}>
+          <div style={{ fontSize: 13, color: C.ink70, lineHeight: 1.6, marginBottom: 12 }}>
+            공용 구글시트에 저장해 여러 명이 실시간으로 함께 씁니다. 관리자가 <b>한 번만</b> 시트에 스크립트를 붙여넣고 배포한 뒤,
+            나온 <b>웹앱 주소(.../exec)</b>를 아래에 붙여넣으세요. (설정 방법은 저장소의 <b>docs/구글시트_연동.md</b> 참고)
+          </div>
+          <div style={{ fontSize: 11, color: C.steel, fontWeight: 700, marginBottom: 5 }}>연결 주소 (Apps Script /exec URL)</div>
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/.../exec"
+            style={{ width: "100%", border: `1px solid ${C.line}`, borderRadius: 8, padding: "9px 10px", fontSize: 12.5, background: "#fff", color: C.ink }} />
+          <div style={{ marginTop: 10, fontSize: 12, color: online === true ? C.teal : online === false ? C.coral : C.steel, background: C.grayBg, borderRadius: 8, padding: "8px 11px", lineHeight: 1.5 }}>
+            {online === true ? "● 현재 구글시트에 연결됨 — 기록이 팀과 공유됩니다."
+              : online === false ? "● 주소가 있지만 연결이 안 돼요. 주소·배포 권한(모든 사용자)을 확인하세요."
+              : "● 현재 이 기기에만 저장 중(공유 안 됨). 주소를 넣으면 팀 공유가 켜집니다."}
+          </div>
+          <div style={{ fontSize: 11.5, color: C.steel, marginTop: 8, lineHeight: 1.5 }}>
+            💡 이 주소를 넣은 링크(<span style={{ fontFamily: MONO }}>?api=주소</span>)를 공유하면, 받는 분은 붙여넣기 없이 바로 연결돼요.
+          </div>
+        </div>
+        <div style={{ padding: "12px 18px 18px", display: "flex", gap: 8 }}>
+          {apiUrl() && <button onClick={disconnect} style={{ border: `1px solid ${C.line}`, background: "#fff", color: C.steel, fontSize: 13.5, fontWeight: 700, borderRadius: 10, padding: "11px 14px" }}>연결 해제</button>}
+          <button onClick={save} style={{ flex: 1, border: "none", background: C.ink, color: "#fff", fontSize: 15, fontWeight: 800, borderRadius: 10, padding: "11px 0" }}>저장하고 연결</button>
         </div>
       </div>
     </div>
