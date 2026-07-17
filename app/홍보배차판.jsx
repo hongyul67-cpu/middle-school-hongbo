@@ -29,7 +29,7 @@ const KEY = "outreach-state-v2";
 const OLD_KEY = "outreach-state-v1";
 const HELP_SEEN = "outreach-help-seen-v1"; // 사용법 안내를 봤는지(기기별)
 const ROUND_LABELS = ["1차", "2차", "3차", "4차", "5차", "6차"];
-const FIELDS = ["status", "rounds", "interest", "reaction", "next", "memo"];
+const FIELDS = ["status", "rounds", "visitors", "interest", "reaction", "next", "memo"];
 
 /* ===== 저장소 (팀 공유: shared=true) =====
    동시편집 안전화:
@@ -132,7 +132,7 @@ function parseCSV(text) {
   return rows.filter((r) => r.some((c) => c !== ""));
 }
 
-const emptyRec = () => ({ status: "미방문", rounds: ["", "", "", "", "", ""], interest: "", reaction: "", next: "", memo: "" });
+const emptyRec = () => ({ status: "미방문", rounds: ["", "", "", "", "", ""], visitors: ["", "", "", "", "", ""], interest: "", reaction: "", next: "", memo: "" });
 const pad2 = (n) => String(n).padStart(2, "0");
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
 const todayStr = () => todayISO(); // (하위호환용 별칭)
@@ -239,10 +239,11 @@ export default function App() {
   }, [rec]);
 
   const exportCSV = () => {
-    const head = ["순위", "학교명", "지역", "시도", "최근3년입학생수", "2026입학생수", "3학년학급수", "학생수", "대표학과", "우선순위점수", "등급", "방문상태", ...ROUND_LABELS, "관심학생수", "반응", "다음할일", "비고"];
+    const head = ["순위", "학교명", "지역", "시도", "최근3년입학생수", "2026입학생수", "3학년학급수", "학생수", "대표학과", "우선순위점수", "등급", "방문상태", ...ROUND_LABELS, "관심학생수", "반응", "다음할일", "비고", ...ROUND_LABELS.map((l) => l + " 방문자")];
     const rows = [...SCHOOLS].sort((a, b) => b.sc - a.sc).map((s, i) => {
       const r = rec(keyOf(s));
-      return [i + 1, s.n, s.g, s.s, s.y3 ?? "", s.y26 ?? "", s.c3 ?? "", s.st ?? "", s.d, s.sc, s.t, r.status, ...r.rounds, r.interest, r.reaction, r.next, r.memo]
+      const visitors = Array.isArray(r.visitors) ? r.visitors : ["", "", "", "", "", ""];
+      return [i + 1, s.n, s.g, s.s, s.y3 ?? "", s.y26 ?? "", s.c3 ?? "", s.st ?? "", s.d, s.sc, s.t, r.status, ...r.rounds, r.interest, r.reaction, r.next, r.memo, ...visitors]
         .map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",");
     });
     const csv = "\uFEFF" + [head.join(","), ...rows].join("\n");
@@ -271,6 +272,7 @@ export default function App() {
         const iStatus = col("방문상태"), iInterest = col("관심학생수"),
           iReact = col("반응"), iNext = col("다음할일"), iMemo = col("비고");
         const iRounds = ROUND_LABELS.map((lb) => col(lb));
+        const iVisitors = ROUND_LABELS.map((lb) => col(lb + " 방문자"));
         const patches = {};
         let matched = 0, skipped = 0;
         for (let r = 1; r < rows.length; r++) {
@@ -283,9 +285,11 @@ export default function App() {
           if (!key || !byKey.has(key)) { skipped++; continue; }
           const get = (i) => (i >= 0 && cells[i] != null ? String(cells[i]).trim() : "");
           const rounds = iRounds.map((i) => normDate(get(i)));
+          const visitors = iVisitors.map((i) => get(i));
           const status = get(iStatus);
           const patch = {
             rounds,
+            visitors,
             interest: get(iInterest),
             reaction: get(iReact),
             next: get(iNext),
@@ -294,7 +298,7 @@ export default function App() {
           if (STATUS.includes(status)) patch.status = status;
           // 실제 내용이 있는 행만 반영(빈 행 스킵)
           const hasContent = (patch.status && patch.status !== "미방문")
-            || rounds.some(Boolean) || patch.interest || patch.reaction || patch.next || patch.memo;
+            || rounds.some(Boolean) || visitors.some(Boolean) || patch.interest || patch.reaction || patch.next || patch.memo;
           if (!hasContent) continue;
           patches[key] = { ...(patches[key] || {}), ...patch };
           matched++;
@@ -492,6 +496,9 @@ function SchoolCard({ s, r, open, onToggle, onUpdate }) {
   const tier = TIER_COLOR[s.t];
   const sc = STATUS_COLOR[r.status];
   const visited = r.rounds.filter(Boolean).length;
+  // 여러 회차에 적힌 방문자 이름을 모아 중복 제거(누가 다녀왔는지 한눈에).
+  const people = Array.from(new Set((Array.isArray(r.visitors) ? r.visitors : [])
+    .flatMap((v) => String(v || "").split(/[,·/]/).map((x) => x.trim()).filter(Boolean))));
   return (
     <div className="row-enter" style={{ background: C.card, border: `1px solid ${C.line}`, borderRadius: 12, marginBottom: 8, overflow: "hidden" }}>
       <div onClick={onToggle} style={{ padding: "12px 13px", display: "flex", gap: 11, alignItems: "flex-start", cursor: "pointer" }}>
@@ -517,6 +524,11 @@ function SchoolCard({ s, r, open, onToggle, onUpdate }) {
               }} />
             ))}
           </div>
+          {people.length > 0 && (
+            <div style={{ fontSize: 11.5, color: C.steel, marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              👤 {people.join(", ")}
+            </div>
+          )}
         </div>
         <span style={{ fontSize: 11, fontWeight: 700, color: sc.fg, background: sc.bg, borderRadius: 6, padding: "4px 8px", whiteSpace: "nowrap" }}>{r.status}</span>
       </div>
@@ -542,17 +554,25 @@ function SchoolCard({ s, r, open, onToggle, onUpdate }) {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 6 }}>
               {ROUND_LABELS.map((lb, i) => {
                 const on = !!r.rounds[i];
+                const visitors = Array.isArray(r.visitors) ? r.visitors : ["", "", "", "", "", ""];
                 const setRound = (val) => { const rounds = [...r.rounds]; rounds[i] = val; onUpdate({ rounds }); };
+                const clearRound = () => { const rounds = [...r.rounds]; rounds[i] = ""; const vs = [...visitors]; vs[i] = ""; onUpdate({ rounds, visitors: vs }); };
+                const setVisitor = (val) => { const vs = [...visitors]; vs[i] = val; onUpdate({ visitors: vs }); };
                 return (
                   <div key={i} style={{ border: `1px solid ${on ? C.amber : C.line}`, background: on ? C.amberBg : "#fff", borderRadius: 8, padding: "6px 7px" }}>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
                       <span style={{ fontSize: 10.5, color: on ? "#9A5B00" : C.steel, fontWeight: 700 }}>{lb}</span>
                       {on
-                        ? <button onClick={() => setRound("")} title="삭제" style={{ border: "none", background: "transparent", color: C.steel, fontSize: 13, lineHeight: 1, padding: 0 }}>✕</button>
+                        ? <button onClick={clearRound} title="삭제" style={{ border: "none", background: "transparent", color: C.steel, fontSize: 13, lineHeight: 1, padding: 0 }}>✕</button>
                         : <button onClick={() => setRound(todayISO())} style={{ border: `1px solid ${C.line}`, background: "#fff", color: C.ink, borderRadius: 5, fontSize: 10, fontWeight: 700, padding: "1px 6px" }}>오늘</button>}
                     </div>
                     <input type="date" value={r.rounds[i] || ""} onChange={(e) => setRound(e.target.value)}
                       style={{ width: "100%", border: `1px solid ${C.line}`, borderRadius: 6, padding: "5px 6px", fontSize: 12.5, fontFamily: MONO, background: "#fff", color: on ? C.ink : C.steelLt }} />
+                    {on && (
+                      <input type="text" value={visitors[i] || ""} onChange={(e) => setVisitor(e.target.value)}
+                        placeholder="방문자 (예: 홍길동, 김철수)"
+                        style={{ width: "100%", marginTop: 4, border: `1px solid ${C.line}`, borderRadius: 6, padding: "5px 6px", fontSize: 12, background: "#fff", color: C.ink }} />
+                    )}
                   </div>
                 );
               })}
