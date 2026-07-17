@@ -42,6 +42,37 @@ async function mergeSave(name, patch) {
   try { await window.storage.set(KEY, JSON.stringify(cur), true); } catch (e) {}
   return cur;
 }
+// 여러 학교 기록을 한 번에 병합 저장(가져오기용). 최신 원본을 다시 읽어 덮어쓰기 최소화.
+async function bulkMergeSave(patches) {
+  let cur = {};
+  try { const r = await window.storage.get(KEY, true); if (r && r.value) cur = JSON.parse(r.value); } catch (e) {}
+  Object.entries(patches).forEach(([name, patch]) => {
+    cur[name] = { ...(cur[name] || {}), ...patch };
+  });
+  try { await window.storage.set(KEY, JSON.stringify(cur), true); } catch (e) {}
+  return cur;
+}
+
+// 따옴표·쉼표·개행을 처리하는 최소 CSV 파서. 반환: 행 배열(각 행은 셀 문자열 배열).
+function parseCSV(text) {
+  const s = text.replace(/^﻿/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const rows = [];
+  let row = [], cell = "", q = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (q) {
+      if (ch === '"') { if (s[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+      else cell += ch;
+    } else {
+      if (ch === '"') q = true;
+      else if (ch === ",") { row.push(cell); cell = ""; }
+      else if (ch === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; }
+      else cell += ch;
+    }
+  }
+  if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter((r) => r.some((c) => c !== ""));
+}
 
 const emptyRec = () => ({ status: "미방문", rounds: ["", "", "", "", "", ""], interest: "", reaction: "", next: "", memo: "" });
 const todayStr = () => { const d = new Date(); return `${d.getMonth() + 1}/${d.getDate()}`; };
@@ -54,6 +85,8 @@ export default function App() {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("priority");
   const [open, setOpen] = useState(null);
+  const [msg, setMsg] = useState("");
+  const fileRef = useRef(null);
 
   useEffect(() => { loadState().then((s) => { setState(s); setReady(true); }); }, []);
 
@@ -109,6 +142,63 @@ export default function App() {
     a.click();
   };
 
+  // CSV 가져오기: 시트/앱에서 내보낸 CSV를 읽어 방문기록만 병합(학교 목록·점수는 SCHOOLS 유지).
+  const importCSV = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const rows = parseCSV(String(ev.target.result || ""));
+        if (rows.length < 2) { setMsg("가져올 데이터가 없습니다."); return; }
+        const head = rows[0].map((h) => h.trim());
+        const col = (name) => head.indexOf(name);
+        const iName = col("학교명");
+        if (iName < 0) { setMsg("CSV에 '학교명' 열이 없습니다. 내보내기 형식의 파일인지 확인하세요."); return; }
+        const known = new Set(SCHOOLS.map((s) => s.n));
+        const iStatus = col("방문상태"), iInterest = col("관심학생수"),
+          iReact = col("반응"), iNext = col("다음할일"), iMemo = col("비고");
+        const iRounds = ROUND_LABELS.map((lb) => col(lb));
+        const patches = {};
+        let matched = 0, skipped = 0, filled = 0;
+        for (let r = 1; r < rows.length; r++) {
+          const cells = rows[r];
+          const name = (cells[iName] || "").trim();
+          if (!name) continue;
+          if (!known.has(name)) { skipped++; continue; }
+          const get = (i) => (i >= 0 && cells[i] != null ? String(cells[i]).trim() : "");
+          const rounds = iRounds.map((i) => get(i));
+          const status = get(iStatus);
+          const patch = {
+            rounds,
+            interest: get(iInterest),
+            reaction: get(iReact),
+            next: get(iNext),
+            memo: get(iMemo),
+          };
+          if (STATUS.includes(status)) patch.status = status;
+          // 실제 내용이 있는 행만 반영(빈 행 스킵)
+          const hasContent = patch.status && patch.status !== "미방문"
+            || rounds.some(Boolean) || patch.interest || patch.reaction || patch.next || patch.memo;
+          if (!hasContent) continue;
+          patches[name] = { ...(patches[name] || {}), ...patch };
+          matched++;
+          if (rounds.some(Boolean)) filled++;
+        }
+        if (matched === 0) { setMsg(`반영할 기록이 없습니다.${skipped ? ` (미매칭 ${skipped}행)` : ""}`); return; }
+        setState((prev) => {
+          const nxt = { ...prev };
+          Object.entries(patches).forEach(([n, p]) => { nxt[n] = { ...(nxt[n] || emptyRec()), ...p }; });
+          return nxt;
+        });
+        bulkMergeSave(patches);
+        setMsg(`가져오기 완료 · ${matched}개 학교 반영${skipped ? ` · 미매칭 ${skipped}행 건너뜀` : ""}`);
+      } catch (e) {
+        setMsg("가져오기 실패: 파일을 읽을 수 없습니다.");
+      }
+    };
+    reader.readAsText(file, "utf-8");
+  };
+
   if (!ready) return <div style={{ fontFamily: SANS, padding: 40, color: C.steel, background: C.paper, minHeight: "100vh" }}>불러오는 중…</div>;
 
   return (
@@ -156,8 +246,16 @@ export default function App() {
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="학교명 검색"
               style={{ flex: 1, border: `1px solid ${C.line}`, borderRadius: 9, padding: "9px 11px", fontSize: 14, background: "#fff", color: C.ink }} />
-            <button onClick={exportCSV} style={{ border: `1px solid ${C.ink}`, background: "#fff", color: C.ink, borderRadius: 9, padding: "9px 12px", fontSize: 12.5, fontWeight: 700 }}>CSV 내보내기</button>
+            <button onClick={() => fileRef.current && fileRef.current.click()} style={{ border: `1px solid ${C.ink}`, background: "#fff", color: C.ink, borderRadius: 9, padding: "9px 12px", fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap" }}>가져오기</button>
+            <button onClick={exportCSV} style={{ border: `1px solid ${C.ink}`, background: "#fff", color: C.ink, borderRadius: 9, padding: "9px 12px", fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap" }}>내보내기</button>
+            <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }}
+              onChange={(e) => { const f = e.target.files && e.target.files[0]; importCSV(f); e.target.value = ""; }} />
           </div>
+          {msg && (
+            <div onClick={() => setMsg("")} style={{ marginTop: 8, fontSize: 12, color: C.ink, background: C.amberBg, border: `1px solid ${C.amber}`, borderRadius: 8, padding: "7px 10px", cursor: "pointer" }}>
+              {msg} <span style={{ color: C.steel, marginLeft: 4 }}>(눌러서 닫기)</span>
+            </div>
+          )}
 
           <div className="scrollx" style={{ display: "flex", gap: 6, overflowX: "auto", marginTop: 9, paddingBottom: 2 }}>
             {regions.map((r) => (
