@@ -515,10 +515,23 @@ function SchoolCard({ s, r, open, onToggle, onUpdate }) {
               placeholder="담당자 반응, 특이사항 등" style={{ ...inp, resize: "vertical", lineHeight: 1.4 }} />
           </Field>
 
-          <a href={`https://map.naver.com/p/search/${encodeURIComponent(s.n)}`} target="_blank" rel="noreferrer"
-            style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 4, fontSize: 12.5, color: C.ink, fontWeight: 700, textDecoration: "none", border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 12px", background: "#fff" }}>
-            📍 네이버 지도에서 열기
-          </a>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+            {(() => {
+              // 지역을 붙여 검색 정확도를 높인다. 좌표(lat/lng)가 있으면 길찾기까지 제공.
+              const query = encodeURIComponent(`${s.n} ${s.g}`);
+              const hasGeo = s.lat != null && s.lng != null;
+              const btn = { display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, color: C.ink, fontWeight: 700, textDecoration: "none", border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 11px", background: "#fff" };
+              return (
+                <>
+                  <a href={`https://map.naver.com/p/search/${query}`} target="_blank" rel="noreferrer" style={btn}>📍 네이버지도</a>
+                  <a href={`https://map.kakao.com/?q=${query}`} target="_blank" rel="noreferrer" style={btn}>🗺️ 카카오맵</a>
+                  {hasGeo && (
+                    <a href={`https://map.naver.com/p/directions/-/${s.lng},${s.lat},${encodeURIComponent(s.n)}/-/transit`} target="_blank" rel="noreferrer" style={{ ...btn, borderColor: C.amber, color: "#9A5B00", background: C.amberBg }}>🚗 길찾기</a>
+                  )}
+                </>
+              );
+            })()}
+          </div>
         </div>
       )}
     </div>
