@@ -88,37 +88,78 @@ function json_(o) {
   return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
 }
 
-// 전체 상태 반환
-function doGet() {
+// 변경분(patches) 병합 저장 공통 로직
+function applyPatches_(sh, patches) {
+  var all = readAll_(sh);
+  var keys = Object.keys(patches || {});
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    var merged = mergeRec_(all.state[key], patches[key]);
+    var parts = key.split('|');
+    var row = recToRow_(parts[0], parts[1] || '', merged);
+    if (all.index[key]) sh.getRange(all.index[key], 1, 1, HEAD.length).setValues([row]);
+    else { sh.appendRow(row); all.index[key] = sh.getLastRow(); }
+    all.state[key] = merged;
+  }
+  return keys.length;
+}
+
+// GET:
+//  - 파라미터 없음 → 전체 상태 반환(읽기)
+//  - patches=... → 변경분 병합 저장(브라우저 CORS 회피용 쓰기 경로)
+function doGet(e) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    var all = readAll_(sheet_());
-    return json_({ ok: true, state: all.state });
+    var sh = sheet_();
+    if (e && e.parameter && e.parameter.patches) {
+      var n = applyPatches_(sh, JSON.parse(e.parameter.patches));
+      return json_({ ok: true, count: n });
+    }
+    return json_({ ok: true, state: readAll_(sh).state });
+  } catch (err) {
+    return json_({ ok: false, error: String(err) });
   } finally { lock.releaseLock(); }
 }
 
-// 변경분(patches) 병합 저장. body: { patches: { "학교명|지역": {필드..., _t:{...}} } }
+// POST(대안 경로). body: { patches: { "학교명|지역": {필드..., _t:{...}} } }
 function doPost(e) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-    var patches = body.patches || {};
-    var sh = sheet_();
-    var all = readAll_(sh);
-    var keys = Object.keys(patches);
-    for (var i = 0; i < keys.length; i++) {
-      var key = keys[i];
-      var merged = mergeRec_(all.state[key], patches[key]);
-      var parts = key.split('|');
-      var row = recToRow_(parts[0], parts[1] || '', merged);
-      if (all.index[key]) sh.getRange(all.index[key], 1, 1, HEAD.length).setValues([row]);
-      else { sh.appendRow(row); all.index[key] = sh.getLastRow(); }
-      all.state[key] = merged;
-    }
-    return json_({ ok: true, count: keys.length });
+    var n = applyPatches_(sheet_(), body.patches || {});
+    return json_({ ok: true, count: n });
   } catch (err) {
     return json_({ ok: false, error: String(err) });
   } finally { lock.releaseLock(); }
+}
+
+// 열 → 필드 매핑(사람이 시트를 직접 고쳤을 때)
+function colToField_(col) {
+  if (col === 3) return 'status';
+  if (col >= 4 && col <= 9) return 'rounds';
+  if (col === 10) return 'interest';
+  if (col === 11) return 'reaction';
+  if (col === 12) return 'next';
+  if (col === 13) return 'memo';
+  if (col >= 14 && col <= 19) return 'visitors';
+  return null;
+}
+
+// 시트를 사람이 직접 편집하면 해당 필드의 _t(시각)를 갱신 → 앱이 그 변경을 받아 보이게 함.
+function onEdit(e) {
+  try {
+    var sh = e.range.getSheet();
+    if (sh.getName() !== SHEET_NAME) return;
+    var row = e.range.getRow(), col = e.range.getColumn();
+    if (row < 2) return;
+    var field = colToField_(col);
+    if (!field) return; // 학교명/지역 등은 대상 아님
+    var tcell = sh.getRange(row, HEAD.length); // _t 열
+    var t = {};
+    try { t = JSON.parse(tcell.getValue() || '{}'); } catch (_) { t = {}; }
+    t[field] = Date.now();
+    tcell.setValue(JSON.stringify(t));
+  } catch (err) { /* 무시 */ }
 }
