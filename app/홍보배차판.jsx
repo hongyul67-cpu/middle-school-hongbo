@@ -102,11 +102,25 @@ async function remoteGet() {
   } catch (e) {}
   _remoteOk = false; return null;
 }
+// 저장은 GET(쿼리에 patches)으로 보낸다. 브라우저→Apps Script는 POST가 CORS로 막히는 경우가 많아,
+// 읽기와 동일한 GET 경로를 쓰면 확실히 통과한다. URL 길이 제한 대비로 여러 개로 쪼개 보낸다.
 function remotePost(patches) {
   const u = apiUrl(); if (!u) return;
-  fetch(u, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ patches }) })
-    .then((r) => r.json()).then((j) => { _remoteOk = !!(j && j.ok); })
-    .catch(() => { _remoteOk = false; });
+  const entries = Object.entries(patches || {});
+  if (!entries.length) return;
+  const chunks = []; let cur = {}, len = 0;
+  for (const [k, v] of entries) {
+    const s = JSON.stringify({ [k]: v }).length;
+    if (len + s > 5000 && Object.keys(cur).length) { chunks.push(cur); cur = {}; len = 0; }
+    cur[k] = v; len += s;
+  }
+  if (Object.keys(cur).length) chunks.push(cur);
+  chunks.forEach((c) => {
+    const url = u + (u.indexOf("?") >= 0 ? "&" : "?") + "patches=" + encodeURIComponent(JSON.stringify(c)) + "&_=" + Date.now();
+    fetch(url, { method: "GET" })
+      .then((r) => r.json()).then((j) => { _remoteOk = !!(j && j.ok); })
+      .catch(() => { _remoteOk = false; });
+  });
 }
 // 공유 상태 읽기: 연결되어 있으면 시트에서, 아니면 로컬에서.
 async function pullShared() {
